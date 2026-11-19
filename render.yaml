@@ -1,0 +1,15 @@
+services:
+  - type: worker
+    name: ai-studio-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: openrouter/free
+      - key: DAILY_LIMIT
+        value: "20"
