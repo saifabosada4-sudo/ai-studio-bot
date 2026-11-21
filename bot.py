@@ -24,6 +24,7 @@ except ImportError as e:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 log = logging.getLogger("ai_studio_bot")
 
+# --- الإعدادات الأساسية ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 GH_GIST_TOKEN = os.environ.get("GH_GIST_TOKEN", "")
@@ -32,12 +33,14 @@ DB_PATH = os.getenv("DB_PATH", "/tmp/bot.sqlite3")
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "20"))
 MAX_HISTORY = 50
 
+# --- شخصية البوت (تم تشديدها عشان ميجيبش سيرة موديلات تانية) ---
 SYSTEM_PROMPT = (
     "أنت مساعد ذكي اسمك 'AI Studio'. أنت بوت على تطبيق تليجرام. "
     "صاحبك ومصممك هو حساب التليجرام @tumej. "
-    "أنت شغال بنظام ذكاء اصطناعي متقدم. "
+    "أنت شغال بنظام ذكاء اصطناعي متقدم من تصميم صاحبك. "
+    "ممنوع تماماً أن تقول إنك أي موديل آخر (مثل نيموترون، جي بي تي، أو أي اسم تاني). اسمك هو AI Studio فقط. "
     "أجب بالعربية بوضوح، وكن مفيداً ودقيقاً. "
-    "عندما يطلب منك كوداً، اكتبه دائماً داخل بلوكات مارك داون هكذا: ```python ... ```"
+    "عندما يطلب منك المستخدم كتابة كود، أو مقال، أو شعر، أو أي محتوى نصي طويل، اكتبه دائماً داخل بلوكات مارك داون هكذا: ```text ... ```"
 )
 
 SCHEMA = """
@@ -51,6 +54,7 @@ CREATE TABLE IF NOT EXISTS usage (
 
 GIST_ID_FILE = "/tmp/gist_id.txt"
 
+# --- قاعدة البيانات والذاكرة ---
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(SCHEMA)
@@ -90,6 +94,7 @@ async def bump_usage(uid):
             row = await cur.fetchone()
     return row[0] if row else 0
 
+# --- دالة الاتصال بالذكاء الاصطناعي ---
 async def ask_ai(messages):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -145,24 +150,29 @@ async def sync_to_gist():
             "files": {"bot.sqlite3": {"content": content}}
         })
 
-# --- إرسال الرد الذكي ---
+# --- دالة إرسال الرد الذكي (بتلقط أي كود أو نص طويل) ---
 async def send_smart_reply(update: Update, reply_text: str, status_msg):
     await status_msg.delete() # مسح رسالة الانتظار
     
+    # بنلقط أي بلوك كود سواء مكتوب عليه txt, python, أو غيره
     code_blocks = re.findall(r"```(?:\w+)?\n?(.*?)```", reply_text, re.DOTALL)
+    
+    # لو لقينا كود أو محتوى طويل بين العلامات
     if code_blocks:
         longest_code = max(code_blocks, key=len).strip()
         file = io.BytesIO(longest_code.encode('utf-8'))
-        file.name = "code.txt"
-        await update.message.reply_document(document=file, caption="اتفضل الكود بتاعك جاهز ✦")
+        file.name = "output.txt" # دايماً هيبعته txt عشان ينفع مع أي محتوى
+        await update.message.reply_document(document=file, caption="اتفضل الملف بتاعك جاهز ✦")
         return
 
+    # لو الرد نفسه طويل جداً ومفيهوش علامات كود
     if len(reply_text) > 3000:
         file = io.BytesIO(reply_text.encode('utf-8'))
         file.name = "response.txt"
         await update.message.reply_document(document=file, caption="الرد طويل، حمل الملف ده ✦")
         return
 
+    # لو الرد عادي
     await update.message.reply_text(reply_text[:4000])
 
 # --- الأوامر الأساسية ---
@@ -170,7 +180,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك فى AI Studio ✦\n"
         "أنا مساعدك الذكي، صممني حساب التليجرام @tumej مخصوص عشان أساعدك.\n\n"
-        "ابعت أى سؤال أو ملف وأنا أرد عليك.\n\n"
+        "ابعت أى سؤال أو ملف وأنا أرد عليك.\n"
+        "المقالات والأكواد هتوصلك كملف جاهز للتحميل.\n\n"
         "/help — المساعدة\n"
         "/clear — مسح المحادثة"
     )
@@ -200,11 +211,10 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"وصلت للحد اليومى ({DAILY_LIMIT} رسالة). ارجع بكرة ✦")
         return
 
-    # هنا هنبعت الرسالة اللي بتدل على التحميل
     status_msg = await update.message.reply_text("⏳ جاري التفكير...")
-
     await add_msg(uid, "user", text)
     history = await get_history(uid)
+    
     try:
         reply = await ask_ai(history)
         await add_msg(uid, "assistant", reply)
@@ -262,13 +272,14 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             text_content = file_bytes.decode("utf-8", errors="ignore")
 
         if not text_content.strip():
-            await status_msg.edit_text("الملف فاضي أو لا يحتوي على نص.")
+            await status_msg.edit_text("الملف فاضي أو لا يحتوي على نص مقروء.")
             return
 
         prompt = f"هذا نص من ملف: {doc.file_name}\n\nالنص:\n{text_content[:10000]}\n\nمن فضلك لخص لي هذا الملف أو جاوبني على أسئلتي عنه."
         
         messages = [{"role": "user", "content": prompt}]
         reply = await ask_ai(messages)
+        
         await send_smart_reply(update, reply, status_msg)
         
     except Exception as e:
