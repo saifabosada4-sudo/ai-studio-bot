@@ -51,7 +51,6 @@ CREATE TABLE IF NOT EXISTS usage (
 
 GIST_ID_FILE = "/tmp/gist_id.txt"
 
-# --- قاعدة البيانات والذاكرة ---
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(SCHEMA)
@@ -91,7 +90,6 @@ async def bump_usage(uid):
             row = await cur.fetchone()
     return row[0] if row else 0
 
-# --- دالة الاتصال بالذكاء الاصطناعي ---
 async def ask_ai(messages):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -147,18 +145,10 @@ async def sync_to_gist():
             "files": {"bot.sqlite3": {"content": content}}
         })
 
-# --- إدارة علامة "بيكتب..." ---
-async def keep_typing(ctx, chat_id, stop_event):
-    while not stop_event.is_set():
-        try:
-            await ctx.bot.send_chat_action(chat_id=chat_id, action="typing")
-        except Exception as e:
-            log.warning(f"Typing action failed: {e}")
-        await asyncio.sleep(4)
-
-# --- إرسال الرد الذكي (ملفات أو نص) ---
-async def send_smart_reply(update: Update, reply_text: str):
-    # 1. لو الرد فيه كود
+# --- إرسال الرد الذكي ---
+async def send_smart_reply(update: Update, reply_text: str, status_msg):
+    await status_msg.delete() # مسح رسالة الانتظار
+    
     code_blocks = re.findall(r"```(?:\w+)?\n?(.*?)```", reply_text, re.DOTALL)
     if code_blocks:
         longest_code = max(code_blocks, key=len).strip()
@@ -167,14 +157,12 @@ async def send_smart_reply(update: Update, reply_text: str):
         await update.message.reply_document(document=file, caption="اتفضل الكود بتاعك جاهز ✦")
         return
 
-    # 2. لو الرد طويل جداً
     if len(reply_text) > 3000:
         file = io.BytesIO(reply_text.encode('utf-8'))
         file.name = "response.txt"
         await update.message.reply_document(document=file, caption="الرد طويل، حمل الملف ده ✦")
         return
 
-    # 3. الرد العادي
     await update.message.reply_text(reply_text[:4000])
 
 # --- الأوامر الأساسية ---
@@ -182,8 +170,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك فى AI Studio ✦\n"
         "أنا مساعدك الذكي، صممني حساب التليجرام @tumej مخصوص عشان أساعدك.\n\n"
-        "ابعت أى سؤال أو ملف (PDF, Word, Excel, Text) وأنا أرد عليك.\n"
-        "الأكواد والردود الطويلة سأرسلها لك كملف جاهز للتحميل.\n\n"
+        "ابعت أى سؤال أو ملف وأنا أرد عليك.\n\n"
         "/help — المساعدة\n"
         "/clear — مسح المحادثة"
     )
@@ -193,20 +180,19 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "الأوامر:\n"
         "/start — البداية\n"
         "/help — المساعدة\n"
-        "/clear — مسح المحادثة\n\n"
-        "الملفات المدعومة: PDF, DOCX, PPTX, XLSX, TXT, PY, JS, JSON, CSV."
+        "/clear — مسح المحادثة"
     )
 
 async def clear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await clear_history(update.effective_user.id)
     await update.message.reply_text("تم مسح المحادثة ✦")
 
-# --- التعامل مع النصوص ---
+# --- النصوص ---
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text
     if not text or len(text) > 4000:
-        await update.message.reply_text("الرسالة طويلة جداً (الحد الأقصى 4000 حرف).")
+        await update.message.reply_text("الرسالة طويلة جداً (الحد 4000 حرف).")
         return
 
     count = await bump_usage(uid)
@@ -214,8 +200,8 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"وصلت للحد اليومى ({DAILY_LIMIT} رسالة). ارجع بكرة ✦")
         return
 
-    stop_event = asyncio.Event()
-    typing_task = asyncio.create_task(keep_typing(ctx, update.effective_chat.id, stop_event))
+    # هنا هنبعت الرسالة اللي بتدل على التحميل
+    status_msg = await update.message.reply_text("⏳ جاري التفكير...")
 
     await add_msg(uid, "user", text)
     history = await get_history(uid)
@@ -223,18 +209,12 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply = await ask_ai(history)
         await add_msg(uid, "assistant", reply)
         await sync_to_gist()
-        
-        stop_event.set()
-        await typing_task
-        
-        await send_smart_reply(update, reply)
+        await send_smart_reply(update, reply, status_msg)
     except Exception as e:
-        stop_event.set()
-        await typing_task
         log.exception("AI error")
-        await update.message.reply_text(f"عذراً، حدث خطأ: {e}")
+        await status_msg.edit_text(f"عذراً، حدث خطأ: {e}")
 
-# --- التعامل مع الملفات ---
+# --- الملفات ---
 async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     count = await bump_usage(uid)
@@ -248,11 +228,10 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     supported_exts = ['pdf', 'docx', 'txt', 'pptx', 'xlsx', 'py', 'js', 'html', 'css', 'json', 'csv', 'md', 'xml']
     if ext not in supported_exts:
-        await update.message.reply_text(f"عذراً، الملفات بامتداد .{ext} غير مدعومة حالياً.")
+        await update.message.reply_text(f"عذراً، الملفات بامتداد .{ext} غير مدعومة.")
         return
 
-    stop_event = asyncio.Event()
-    typing_task = asyncio.create_task(keep_typing(ctx, update.effective_chat.id, stop_event))
+    status_msg = await update.message.reply_text("⏳ جاري قراءة الملف...")
 
     try:
         file = await doc.get_file()
@@ -283,27 +262,19 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             text_content = file_bytes.decode("utf-8", errors="ignore")
 
         if not text_content.strip():
-            stop_event.set()
-            await typing_task
-            await update.message.reply_text("الملف فاضي أو لا يحتوي على نص مقروء.")
+            await status_msg.edit_text("الملف فاضي أو لا يحتوي على نص.")
             return
 
         prompt = f"هذا نص من ملف: {doc.file_name}\n\nالنص:\n{text_content[:10000]}\n\nمن فضلك لخص لي هذا الملف أو جاوبني على أسئلتي عنه."
         
         messages = [{"role": "user", "content": prompt}]
         reply = await ask_ai(messages)
-        
-        stop_event.set()
-        await typing_task
-        await send_smart_reply(update, reply)
+        await send_smart_reply(update, reply, status_msg)
         
     except Exception as e:
-        stop_event.set()
-        await typing_task
         log.exception("File error")
-        await update.message.reply_text(f"عذراً، حدث خطأ أثناء قراءة الملف: {e}")
+        await status_msg.edit_text(f"عذراً، حدث خطأ في قراءة الملف: {e}")
 
-# --- بدء التشغيل ---
 async def post_init(app):
     commands = [
         BotCommand("start", "بدء المحادثة"),
