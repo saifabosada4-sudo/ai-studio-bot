@@ -23,4 +23,6 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GH_GIST_TOKEN: ${{ secrets.GH_GIST_TOKEN }}
+          ADMIN_ID: ${{ secrets.ADMIN_ID }}
         run: python bot.py
