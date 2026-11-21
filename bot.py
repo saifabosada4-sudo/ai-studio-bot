@@ -36,7 +36,7 @@ FREE_FILE_LIMIT = 15
 VIP_PRICE_STARS = 50
 VIP_PRICE_CASH = 50
 
-# ✅ رقم اتصالات كاش بتاعك
+# رقم اتصالات كاش بتاعك
 VODAFONE_NUMBER = "01118539519" 
 
 SYSTEM_PROMPT = (
@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS users (
  user_id INTEGER PRIMARY KEY, first_name TEXT, vip_until INTEGER DEFAULT 0);
 """
 
+# --- قاعدة البيانات ---
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(SCHEMA)
@@ -98,6 +99,7 @@ async def bump_usage(uid, is_file=False):
             await db.execute("INSERT INTO usage (user_id, day, msg_count) VALUES (?, ?, 1) ON CONFLICT(user_id, day) DO UPDATE SET msg_count = msg_count + 1", (uid, day))
         await db.commit()
 
+# --- الذاكرة (Gist) ---
 async def sync_from_gist():
     if not GH_GIST_TOKEN: return
     headers = {"Authorization": f"token {GH_GIST_TOKEN}"}
@@ -146,6 +148,7 @@ async def send_smart_reply(update: Update, reply_text: str, status_msg):
     else:
         await update.message.reply_text(reply_text[:4000])
 
+# --- الأوامر ---
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update_user(update.effective_user.id, update.effective_user.first_name)
     await update.message.reply_text(
@@ -208,6 +211,7 @@ async def vip_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+# --- الدفع ---
 async def pay_stars_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -282,6 +286,7 @@ async def admin_approval_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(uid, "❌ عذراً، تم رفض الإيصال. يرجى التأكد من التحويل والمحاولة مرة أخرى.")
         await query.edit_message_caption(caption=f"❌ تم رفض الإيصال للمستخدم {uid}")
 
+# --- الدعم الفني ---
 async def support_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["waiting_for_support"] = True
     await update.message.reply_text("📝 اكتب رسالتك أو مشكلتك دلوقتى، وهتتبعت للإدارة على طول، وهنرد عليك في أقرب وقت. (لو غيرت رأيك اكتب /cancel).")
@@ -336,6 +341,7 @@ async def send_admin_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ تم إرسال الرد للمستخدم بنجاح.")
     return True
 
+# --- المعالجة الأساسية ---
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if await send_admin_reply(update, ctx): return
     if ctx.user_data.get("waiting_for_receipt"):
@@ -463,8 +469,4 @@ def main():
     
     app.add_handler(CallbackQueryHandler(pay_cash_cb, pattern="^pay_cash$"))
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_receipt))
-    app.add_handler(CallbackQueryHandler(admin_approval_cb, pattern="^(approve|reject)_"))
-    
-    app.add_handler(CallbackQueryHandler(admin_reply_cb, pattern="^reply_"))
-    
-    app.add_handler(Me
+    app.add_handler(CallbackQueryHandler(admin_approval_cb, pattern=
