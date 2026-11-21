@@ -6,6 +6,7 @@ import aiosqlite
 import json
 import base64
 import io
+import re
 from telegram import Update, BotCommand
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -151,7 +152,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك فى AI Studio ✦\n"
         "أنا مساعدك الذكي، صممني حساب التليجرام @tumej مخصوص عشان أساعدك.\n\n"
-        "ابعت أى سؤال أو ملف (PDF, Word, Excel, PowerPoint, Text) وأنا أرد عليك.\n\n"
+        "ابعت أى سؤال أو ملف (PDF, Word, Excel, PowerPoint, Text) وأنا أرد عليك.\n"
+        "يمكنك طلب كود أو مقال وسأرسله لك كملف جاهز للتحميل.\n\n"
         "/help — المساعدة\n"
         "/clear — مسح المحادثة"
     )
@@ -168,6 +170,28 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def clear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await clear_history(update.effective_user.id)
     await update.message.reply_text("تم مسح المحادثة ✦")
+
+# دالة ذكية عشان تكتشف لو الرد فيه كود أو طويل
+async def send_reply_with_file(update, reply_text):
+    # لو الرد فيه كود بايثون
+    if "```python" in reply_text:
+        code = re.search(r"```python(.*?)```", reply_text, re.DOTALL)
+        if code:
+            file_content = code.group(1).strip()
+            file = io.BytesIO(file_content.encode('utf-8'))
+            file.name = "code.py"
+            await update.message.reply_document(document=file, caption="اتفضل الكود بتاعك ✦")
+            return # بنكتفي بإرسال الملف
+
+    # لو الرد طويل جداً (أكتر من 3000 حرف)
+    if len(reply_text) > 3000:
+        file = io.BytesIO(reply_text.encode('utf-8'))
+        file.name = "reply.txt"
+        await update.message.reply_document(document=file, caption="الرد طويل، حمل الملف ده ✦")
+        return
+
+    # لو الرد عادي
+    await update.message.reply_text(reply_text[:4000])
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -188,12 +212,13 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply = await ask_ai(history)
         await add_msg(uid, "assistant", reply)
         await sync_to_gist()
-        await update.message.reply_text(reply[:4000])
+        await send_reply_with_file(update, reply)
     except Exception as e:
         log.exception("AI error")
         await update.message.reply_text(f"حصل خطأ: {e}")
 
 async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # نفس الكود القديم (مش هنغيره)
     uid = update.effective_user.id
     count = await bump_usage(uid)
     if count > DAILY_LIMIT:
@@ -238,7 +263,6 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     row_text = " | ".join([str(cell) for cell in row if cell is not None])
                     if row_text: text_content += row_text + "\n"
         else: 
-            # للملفات النصية والبرمجية
             text_content = file_bytes.decode("utf-8", errors="ignore")
 
         if not text_content.strip():
@@ -249,7 +273,8 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         
         messages = [{"role": "user", "content": prompt}]
         reply = await ask_ai(messages)
-        await msg.edit_text(reply[:4000])
+        await send_reply_with_file(update, reply)
+        await msg.delete() # بنمسح رسالة "جاري القراءة"
         
     except Exception as e:
         log.exception("File error")
