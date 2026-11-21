@@ -3,26 +3,31 @@ import time
 import logging
 import httpx
 import aiosqlite
-import json
 import base64
 import io
 import re
+import asyncio
 from telegram import Update, BotCommand
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes
 )
-from pypdf import PdfReader
-from docx import Document
-from pptx import Presentation
-import openpyxl
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("bot")
+# --- محاولة استيراد المكتبات الاختيارية ---
+try:
+    from pypdf import PdfReader
+    from docx import Document
+    from pptx import Presentation
+    import openpyxl
+except ImportError as e:
+    logging.error(f"Missing library: {e}")
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+log = logging.getLogger("ai_studio_bot")
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 GH_GIST_TOKEN = os.environ.get("GH_GIST_TOKEN", "")
-MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
+MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/auto")
 DB_PATH = os.getenv("DB_PATH", "/tmp/bot.sqlite3")
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "20"))
 MAX_HISTORY = 50
@@ -31,8 +36,8 @@ SYSTEM_PROMPT = (
     "أنت مساعد ذكي اسمك 'AI Studio'. أنت بوت على تطبيق تليجرام. "
     "صاحبك ومصممك هو حساب التليجرام @tumej. "
     "أنت شغال بنظام ذكاء اصطناعي متقدم. "
-    "أجب بالعربية الواضحة (أو بنفس لغة المستخدم)، وكن مفيداً، دقيقاً، وخدوم. "
-    "متقولش إنك مجرد نموذج لغوي، أنت مساعد AI Studio الشخصي."
+    "أجب بالعربية بوضوح، وكن مفيداً ودقيقاً. "
+    "عندما يطلب منك كوداً، اكتبه دائماً داخل بلوكات مارك داون هكذا: ```python ... ```"
 )
 
 SCHEMA = """
@@ -46,6 +51,7 @@ CREATE TABLE IF NOT EXISTS usage (
 
 GIST_ID_FILE = "/tmp/gist_id.txt"
 
+# --- قاعدة البيانات والذاكرة ---
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(SCHEMA)
@@ -77,17 +83,15 @@ async def bump_usage(uid):
     day = time.strftime("%Y-%m-%d")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO usage VALUES (?,?,1) "
-            "ON CONFLICT(user_id,day) DO UPDATE SET count=count+1",
+            "INSERT INTO usage VALUES (?,?,1) ON CONFLICT(user_id,day) DO UPDATE SET count=count+1",
             (uid, day),
         )
         await db.commit()
-        async with db.execute(
-            "SELECT count FROM usage WHERE user_id=? AND day=?", (uid, day)
-        ) as cur:
+        async with db.execute("SELECT count FROM usage WHERE user_id=? AND day=?", (uid, day)) as cur:
             row = await cur.fetchone()
     return row[0] if row else 0
 
+# --- دالة الاتصال بالذكاء الاصطناعي ---
 async def ask_ai(messages):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -97,21 +101,17 @@ async def ask_ai(messages):
     }
     payload = {
         "model": MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            *messages,
-        ],
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *messages],
     }
     async with httpx.AsyncClient(timeout=120) as c:
-        r = await c.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            json=payload, headers=headers,
-        )
+        r = await c.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers)
         if r.status_code != 200:
-            raise RuntimeError(r.text[:200])
+            error_data = r.json().get("error", {})
+            err_msg = error_data.get("message", r.text[:200])
+            raise RuntimeError(err_msg)
         return r.json()["choices"][0]["message"]["content"]
 
-# --- Gist Sync ---
+# --- مزامنة الذاكرة مع GitHub Gist ---
 async def sync_from_gist():
     if not GH_GIST_TOKEN: return
     headers = {"Authorization": f"token {GH_GIST_TOKEN}"}
@@ -147,13 +147,43 @@ async def sync_to_gist():
             "files": {"bot.sqlite3": {"content": content}}
         })
 
-# --- Handlers ---
+# --- إدارة علامة "بيكتب..." ---
+async def keep_typing(ctx, chat_id, stop_event):
+    while not stop_event.is_set():
+        try:
+            await ctx.bot.send_chat_action(chat_id=chat_id, action="typing")
+        except Exception as e:
+            log.warning(f"Typing action failed: {e}")
+        await asyncio.sleep(4)
+
+# --- إرسال الرد الذكي (ملفات أو نص) ---
+async def send_smart_reply(update: Update, reply_text: str):
+    # 1. لو الرد فيه كود
+    code_blocks = re.findall(r"```(?:\w+)?\n?(.*?)```", reply_text, re.DOTALL)
+    if code_blocks:
+        longest_code = max(code_blocks, key=len).strip()
+        file = io.BytesIO(longest_code.encode('utf-8'))
+        file.name = "code.txt"
+        await update.message.reply_document(document=file, caption="اتفضل الكود بتاعك جاهز ✦")
+        return
+
+    # 2. لو الرد طويل جداً
+    if len(reply_text) > 3000:
+        file = io.BytesIO(reply_text.encode('utf-8'))
+        file.name = "response.txt"
+        await update.message.reply_document(document=file, caption="الرد طويل، حمل الملف ده ✦")
+        return
+
+    # 3. الرد العادي
+    await update.message.reply_text(reply_text[:4000])
+
+# --- الأوامر الأساسية ---
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك فى AI Studio ✦\n"
         "أنا مساعدك الذكي، صممني حساب التليجرام @tumej مخصوص عشان أساعدك.\n\n"
-        "ابعت أى سؤال أو ملف (PDF, Word, Excel, PowerPoint, Text) وأنا أرد عليك.\n"
-        "يمكنك طلب كود أو مقال وسأرسله لك كملف جاهز للتحميل.\n\n"
+        "ابعت أى سؤال أو ملف (PDF, Word, Excel, Text) وأنا أرد عليك.\n"
+        "الأكواد والردود الطويلة سأرسلها لك كملف جاهز للتحميل.\n\n"
         "/help — المساعدة\n"
         "/clear — مسح المحادثة"
     )
@@ -171,33 +201,12 @@ async def clear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await clear_history(update.effective_user.id)
     await update.message.reply_text("تم مسح المحادثة ✦")
 
-# دالة ذكية عشان تكتشف لو الرد فيه كود أو طويل
-async def send_reply_with_file(update, reply_text):
-    # لو الرد فيه كود بايثون
-    if "```python" in reply_text:
-        code = re.search(r"```python(.*?)```", reply_text, re.DOTALL)
-        if code:
-            file_content = code.group(1).strip()
-            file = io.BytesIO(file_content.encode('utf-8'))
-            file.name = "code.py"
-            await update.message.reply_document(document=file, caption="اتفضل الكود بتاعك ✦")
-            return # بنكتفي بإرسال الملف
-
-    # لو الرد طويل جداً (أكتر من 3000 حرف)
-    if len(reply_text) > 3000:
-        file = io.BytesIO(reply_text.encode('utf-8'))
-        file.name = "reply.txt"
-        await update.message.reply_document(document=file, caption="الرد طويل، حمل الملف ده ✦")
-        return
-
-    # لو الرد عادي
-    await update.message.reply_text(reply_text[:4000])
-
+# --- التعامل مع النصوص ---
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text
     if not text or len(text) > 4000:
-        await update.message.reply_text("الرسالة طويلة جداً (الحد 4000 حرف).")
+        await update.message.reply_text("الرسالة طويلة جداً (الحد الأقصى 4000 حرف).")
         return
 
     count = await bump_usage(uid)
@@ -205,20 +214,28 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"وصلت للحد اليومى ({DAILY_LIMIT} رسالة). ارجع بكرة ✦")
         return
 
+    stop_event = asyncio.Event()
+    typing_task = asyncio.create_task(keep_typing(ctx, update.effective_chat.id, stop_event))
+
     await add_msg(uid, "user", text)
     history = await get_history(uid)
-    await ctx.bot.send_chat_action(update.effective_chat.id, "typing")
     try:
         reply = await ask_ai(history)
         await add_msg(uid, "assistant", reply)
         await sync_to_gist()
-        await send_reply_with_file(update, reply)
+        
+        stop_event.set()
+        await typing_task
+        
+        await send_smart_reply(update, reply)
     except Exception as e:
+        stop_event.set()
+        await typing_task
         log.exception("AI error")
-        await update.message.reply_text(f"حصل خطأ: {e}")
+        await update.message.reply_text(f"عذراً، حدث خطأ: {e}")
 
+# --- التعامل مع الملفات ---
 async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # نفس الكود القديم (مش هنغيره)
     uid = update.effective_user.id
     count = await bump_usage(uid)
     if count > DAILY_LIMIT:
@@ -234,8 +251,8 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"عذراً، الملفات بامتداد .{ext} غير مدعومة حالياً.")
         return
 
-    msg = await update.message.reply_text(f"جاري قراءة الملف ({file_name})... ⏳")
-    await ctx.bot.send_chat_action(update.effective_chat.id, "typing")
+    stop_event = asyncio.Event()
+    typing_task = asyncio.create_task(keep_typing(ctx, update.effective_chat.id, stop_event))
 
     try:
         file = await doc.get_file()
@@ -266,20 +283,27 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             text_content = file_bytes.decode("utf-8", errors="ignore")
 
         if not text_content.strip():
-            await msg.edit_text("الملف فاضي أو مش قادر أقرأ الكلام اللي جواه.")
+            stop_event.set()
+            await typing_task
+            await update.message.reply_text("الملف فاضي أو لا يحتوي على نص مقروء.")
             return
 
         prompt = f"هذا نص من ملف: {doc.file_name}\n\nالنص:\n{text_content[:10000]}\n\nمن فضلك لخص لي هذا الملف أو جاوبني على أسئلتي عنه."
         
         messages = [{"role": "user", "content": prompt}]
         reply = await ask_ai(messages)
-        await send_reply_with_file(update, reply)
-        await msg.delete() # بنمسح رسالة "جاري القراءة"
+        
+        stop_event.set()
+        await typing_task
+        await send_smart_reply(update, reply)
         
     except Exception as e:
+        stop_event.set()
+        await typing_task
         log.exception("File error")
-        await msg.edit_text(f"حصل خطأ في قراءة الملف: {e}")
+        await update.message.reply_text(f"عذراً، حدث خطأ أثناء قراءة الملف: {e}")
 
+# --- بدء التشغيل ---
 async def post_init(app):
     commands = [
         BotCommand("start", "بدء المحادثة"),
@@ -291,6 +315,10 @@ async def post_init(app):
     await init_db()
 
 def main():
+    if not BOT_TOKEN or not OPENROUTER_API_KEY:
+        log.critical("BOT_TOKEN or OPENROUTER_API_KEY is missing!")
+        return
+
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
@@ -298,8 +326,8 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     
-    log.info("Bot starting...")
-    app.run_polling()
+    log.info("AI Studio Bot is starting...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
