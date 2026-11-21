@@ -195,7 +195,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"حصل خطأ: {e}")
 
 async def post_init(app):
-    # ضبط أزرار الأوامر اللي بتظهر على الجنب
+    # الكود ده هو اللي بيخلي الأوامر تظهر تحت زي البوتات الاحترافية
     commands = [
         BotCommand("start", "بدء المحادثة"),
         BotCommand("help", "المساعدة"),
