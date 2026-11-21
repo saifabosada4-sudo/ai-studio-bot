@@ -5,7 +5,7 @@ import httpx
 import aiosqlite
 import json
 import base64
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes
 )
@@ -21,12 +21,13 @@ DB_PATH = os.getenv("DB_PATH", "/tmp/bot.sqlite3")
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "20"))
 MAX_HISTORY = 50
 
-# هنا شخصية البوت مع اليوزر بتاعك
+# شخصية البوت (من غير اسمك)
 SYSTEM_PROMPT = (
     "أنت مساعد ذكي اسمك 'AI Studio'. أنت بوت على تطبيق تليجرام. "
-    "صاحبك ومصممك هو المبرمج سيف (Saif)، وحسابه على تليجرام هو @tumej. "
-    "أنت فخور جداً إنك من تصميم سيف، وبتعتبره صاحب فضل عليك. "
-    "لو حد سألك مين صممك أو مين صاحبك، قوله بكل فخر إن المبرمج سيف (@tumej) هو اللي عملك. "
+    "صاحبك ومصممك هو حساب التليجرام @tumej. "
+    "أنت فخور جداً إنك من تصميم @tumej، وبتعتبره صاحب فضل عليك. "
+    "لو حد سألك مين صممك أو مين صاحبك، قوله بكل فخر إن حساب التليجرام @tumej هو اللي عملك. "
+    "متذكرش أي اسم شخصي تاني، اكتفي باليوزر @tumej. "
     "أنت شغال بنظام ذكاء اصطناعي متقدم. "
     "أجب بالعربية الواضحة (أو بنفس لغة المستخدم)، وكن مفيداً، دقيقاً، وخدوم. "
     "متقولش إنك مجرد نموذج لغوي، أنت مساعد AI Studio الشخصي."
@@ -148,7 +149,9 @@ async def sync_to_gist():
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك فى AI Studio ✦\n"
-        "أنا مساعدك الذكي، صممني المبرمج سيف (@tumej) مخصوص عشان أساعدك.\n\n"
+        "أنا مساعدك الذكي، صممني حساب التليجرام @tumej مخصوص عشان أساعدك.\n\n"
+        "ابعت أى سؤال وأنا أرد عليك فوراً.\n\n"
+        "استخدم الأزرار اللي تحت أو الأوامر:\n"
         "/help — المساعدة\n"
         "/clear — مسح المحادثة"
     )
@@ -192,7 +195,14 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"حصل خطأ: {e}")
 
 async def post_init(app):
-    await sync_from_gist() # استرجاع الذاكرة
+    # ضبط أزرار الأوامر اللي بتظهر على الجنب
+    commands = [
+        BotCommand("start", "بدء المحادثة"),
+        BotCommand("help", "المساعدة"),
+        BotCommand("clear", "مسح المحادثة")
+    ]
+    await app.bot.set_my_commands(commands)
+    await sync_from_gist()
     await init_db()
 
 def main():
