@@ -5,10 +5,15 @@ import httpx
 import aiosqlite
 import json
 import base64
+import io
 from telegram import Update, BotCommand
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes
 )
+from pypdf import PdfReader
+from docx import Document
+from pptx import Presentation
+import openpyxl
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
@@ -21,13 +26,9 @@ DB_PATH = os.getenv("DB_PATH", "/tmp/bot.sqlite3")
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "20"))
 MAX_HISTORY = 50
 
-# شخصية البوت (من غير اسمك)
 SYSTEM_PROMPT = (
     "أنت مساعد ذكي اسمك 'AI Studio'. أنت بوت على تطبيق تليجرام. "
     "صاحبك ومصممك هو حساب التليجرام @tumej. "
-    "أنت فخور جداً إنك من تصميم @tumej، وبتعتبره صاحب فضل عليك. "
-    "لو حد سألك مين صممك أو مين صاحبك، قوله بكل فخر إن حساب التليجرام @tumej هو اللي عملك. "
-    "متذكرش أي اسم شخصي تاني، اكتفي باليوزر @tumej. "
     "أنت شغال بنظام ذكاء اصطناعي متقدم. "
     "أجب بالعربية الواضحة (أو بنفس لغة المستخدم)، وكن مفيداً، دقيقاً، وخدوم. "
     "متقولش إنك مجرد نموذج لغوي، أنت مساعد AI Studio الشخصي."
@@ -100,7 +101,7 @@ async def ask_ai(messages):
             *messages,
         ],
     }
-    async with httpx.AsyncClient(timeout=60) as c:
+    async with httpx.AsyncClient(timeout=120) as c:
         r = await c.post(
             "https://openrouter.ai/api/v1/chat/completions",
             json=payload, headers=headers,
@@ -109,7 +110,7 @@ async def ask_ai(messages):
             raise RuntimeError(r.text[:200])
         return r.json()["choices"][0]["message"]["content"]
 
-# --- Gist Sync Functions (الذاكرة) ---
+# --- Gist Sync ---
 async def sync_from_gist():
     if not GH_GIST_TOKEN: return
     headers = {"Authorization": f"token {GH_GIST_TOKEN}"}
@@ -150,8 +151,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك فى AI Studio ✦\n"
         "أنا مساعدك الذكي، صممني حساب التليجرام @tumej مخصوص عشان أساعدك.\n\n"
-        "ابعت أى سؤال وأنا أرد عليك فوراً.\n\n"
-        "استخدم الأزرار اللي تحت أو الأوامر:\n"
+        "ابعت أى سؤال أو ملف (PDF, Word, Excel, PowerPoint, Text) وأنا أرد عليك.\n\n"
         "/help — المساعدة\n"
         "/clear — مسح المحادثة"
     )
@@ -161,7 +161,8 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "الأوامر:\n"
         "/start — البداية\n"
         "/help — المساعدة\n"
-        "/clear — مسح المحادثة"
+        "/clear — مسح المحادثة\n\n"
+        "الملفات المدعومة: PDF, DOCX, PPTX, XLSX, TXT, PY, JS, JSON, CSV."
     )
 
 async def clear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -177,9 +178,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     count = await bump_usage(uid)
     if count > DAILY_LIMIT:
-        await update.message.reply_text(
-            f"وصلت للحد اليومى ({DAILY_LIMIT} رسالة). ارجع بكرة ✦"
-        )
+        await update.message.reply_text(f"وصلت للحد اليومى ({DAILY_LIMIT} رسالة). ارجع بكرة ✦")
         return
 
     await add_msg(uid, "user", text)
@@ -188,14 +187,75 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         reply = await ask_ai(history)
         await add_msg(uid, "assistant", reply)
-        await sync_to_gist() # حفظ الذاكرة
+        await sync_to_gist()
         await update.message.reply_text(reply[:4000])
     except Exception as e:
         log.exception("AI error")
         await update.message.reply_text(f"حصل خطأ: {e}")
 
+async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    count = await bump_usage(uid)
+    if count > DAILY_LIMIT:
+        await update.message.reply_text(f"وصلت للحد اليومى ({DAILY_LIMIT}). ارجع بكرة ✦")
+        return
+
+    doc = update.message.document
+    file_name = doc.file_name.lower()
+    ext = file_name.split('.')[-1]
+
+    supported_exts = ['pdf', 'docx', 'txt', 'pptx', 'xlsx', 'py', 'js', 'html', 'css', 'json', 'csv', 'md', 'xml']
+    if ext not in supported_exts:
+        await update.message.reply_text(f"عذراً، الملفات بامتداد .{ext} غير مدعومة حالياً.")
+        return
+
+    msg = await update.message.reply_text(f"جاري قراءة الملف ({file_name})... ⏳")
+    await ctx.bot.send_chat_action(update.effective_chat.id, "typing")
+
+    try:
+        file = await doc.get_file()
+        file_bytes = await file.download_as_bytearray()
+        text_content = ""
+
+        if ext == 'pdf':
+            pdf = PdfReader(io.BytesIO(file_bytes))
+            for page in pdf.pages:
+                text_content += page.extract_text() or ""
+        elif ext == 'docx':
+            docx = Document(io.BytesIO(file_bytes))
+            for para in docx.paragraphs:
+                text_content += para.text + "\n"
+        elif ext == 'pptx':
+            prs = Presentation(io.BytesIO(file_bytes))
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        text_content += shape.text + "\n"
+        elif ext == 'xlsx':
+            wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+            for sheet in wb.worksheets:
+                for row in sheet.iter_rows(values_only=True):
+                    row_text = " | ".join([str(cell) for cell in row if cell is not None])
+                    if row_text: text_content += row_text + "\n"
+        else: 
+            # للملفات النصية والبرمجية
+            text_content = file_bytes.decode("utf-8", errors="ignore")
+
+        if not text_content.strip():
+            await msg.edit_text("الملف فاضي أو مش قادر أقرأ الكلام اللي جواه.")
+            return
+
+        prompt = f"هذا نص من ملف: {doc.file_name}\n\nالنص:\n{text_content[:10000]}\n\nمن فضلك لخص لي هذا الملف أو جاوبني على أسئلتي عنه."
+        
+        messages = [{"role": "user", "content": prompt}]
+        reply = await ask_ai(messages)
+        await msg.edit_text(reply[:4000])
+        
+    except Exception as e:
+        log.exception("File error")
+        await msg.edit_text(f"حصل خطأ في قراءة الملف: {e}")
+
 async def post_init(app):
-    # الكود ده هو اللي بيخلي الأوامر تظهر تحت زي البوتات الاحترافية
     commands = [
         BotCommand("start", "بدء المحادثة"),
         BotCommand("help", "المساعدة"),
@@ -211,6 +271,8 @@ def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(MessageHandler(filters.Document.ALL, on_document))
+    
     log.info("Bot starting...")
     app.run_polling()
 
