@@ -25,12 +25,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 log = logging.getLogger("ai_studio_bot")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+# هنستخدم نفس اسم السيكرت القديم عشان منغيرش حاجة في جيت هاب
+GROQ_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 GH_GIST_TOKEN = os.environ.get("GH_GIST_TOKEN", "")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "7112513322")) 
-MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 DB_PATH = os.getenv("DB_PATH", "/tmp/bot.sqlite3")
 
+# ثوابت
+MODEL = "llama-3.3-70b-versatile"
 FREE_MSG_LIMIT = 100
 FREE_FILE_LIMIT = 15
 VIP_PRICE_STARS = 50
@@ -38,12 +40,9 @@ VIP_PRICE_CASH = 50
 
 SYSTEM_PROMPT = (
     "أنت مساعد ذكي اسمك 'AI Studio'. صاحبك ومصممك هو حساب التليجرام @tumej. "
-    "أنت بوت محترف ومتقدم جداً، ومهمتك تنفيذ أوامر المستخدم بدقة واحترافية. "
-    "أجب بالعربية الواضحة (أو بنفس لغة المستخدم)، وكن مفيداً، دقيقاً، وخدوم، ومختصراً. "
-    "ممنوع تماماً أن تقول للمستخدم (انسخ النص التالي) أو (لا أستطيع إنشاء ملف). "
-    "إذا طلب منك المستخدم كتابة (شعر، مقال، قصة، كود برمجي، أو أي نص طويل)، "
-    "ضع المحتوى بالكامل داخل بلوك كود هكذا: ```text [المحتوى هنا] ```، "
-    "وأن تكتفي ببلوك الكود فقط، بدون أي كلام إضافي أو شرح أو خطوات."
+    "أنت بوت محترف ومتقدم جداً. أجب بالعربية بوضوح، وكن مفيداً، دقيقاً، ومختصراً. "
+    "ممنوع تماماً أن تقول (انسخ النص التالي) أو (لا أستطيع). "
+    "إذا طلب منك المستخدم كود أو مقال طويل، ضعه في بلوك كود ```text ... ``` فقط."
 )
 
 SCHEMA = """
@@ -128,17 +127,21 @@ async def sync_to_gist():
     async with httpx.AsyncClient() as client:
         await client.patch(f"https://api.github.com/gists/{gist_id}", headers=headers, json={"files": {"bot.sqlite3": {"content": content}}})
 
-# ----------------- الذكاء الاصطناعي (مع max_tokens) -----------------
+# ----------------- الذكاء الاصطناعي (Groq) -----------------
 async def ask_ai(messages):
-    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}", 
+        "Content-Type": "application/json"
+    }
     payload = {
         "model": MODEL,
         "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *messages],
         "max_tokens": 1000
     }
     async with httpx.AsyncClient(timeout=120) as c:
-        r = await c.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers)
-        if r.status_code != 200: raise RuntimeError(r.text[:200])
+        r = await c.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers)
+        if r.status_code != 200: 
+            raise RuntimeError(r.text[:200])
         return r.json()["choices"][0]["message"]["content"]
 
 # ----------------- إرسال الردود -----------------
@@ -477,7 +480,7 @@ async def post_init(app):
     await init_db()
 
 def main():
-    if not BOT_TOKEN or not OPENROUTER_API_KEY: return
+    if not BOT_TOKEN or not GROQ_API_KEY: return
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_error_handler(error_handler)
     
