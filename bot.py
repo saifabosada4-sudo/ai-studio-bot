@@ -25,14 +25,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 log = logging.getLogger("ai_studio_bot")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-# هنستخدم نفس اسم السيكرت القديم عشان منغيرش حاجة في جيت هاب
 GROQ_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 GH_GIST_TOKEN = os.environ.get("GH_GIST_TOKEN", "")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "7112513322")) 
 DB_PATH = os.getenv("DB_PATH", "/tmp/bot.sqlite3")
 
 # ثوابت
-MODEL = "llama-3.3-70b-versatile"
+MODEL = "openai/gpt-oss-120b"
 FREE_MSG_LIMIT = 100
 FREE_FILE_LIMIT = 15
 VIP_PRICE_STARS = 50
@@ -54,6 +53,8 @@ CREATE TABLE IF NOT EXISTS users (
  user_id INTEGER PRIMARY KEY, first_name TEXT, vip_until INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS support_cooldown (
  user_id INTEGER PRIMARY KEY, last_time INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS banned_users (
+ user_id INTEGER PRIMARY KEY);
 """
 
 # ----------------- قاعدة البيانات -----------------
@@ -136,7 +137,7 @@ async def ask_ai(messages):
     payload = {
         "model": MODEL,
         "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *messages],
-        "max_tokens": 1000
+        "max_tokens": 2000 # رفعناه لـ 2000 عشان الموديل الجديد بيفكر
     }
     async with httpx.AsyncClient(timeout=120) as c:
         r = await c.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers)
@@ -377,8 +378,82 @@ async def send_admin_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ تم إرسال الرد للمستخدم.")
     return True
 
+# ----------------- أوامر الأدمن -----------------
+async def admin_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM users") as cur:
+            total_users = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM users WHERE vip_until > ?", (int(time.time()),)) as cur:
+            vip_users = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM messages") as cur:
+            total_msgs = (await cur.fetchone())[0]
+    await update.message.reply_text(
+        f"📊 **إحصائيات البوت:**\n\n"
+        f"👥 إجمالي المستخدمين: {total_users}\n"
+        f"👑 مستخدمين VIP: {vip_users}\n"
+        f"💬 إجمالي الرسائل: {total_msgs}",
+        parse_mode="Markdown"
+    )
+
+async def admin_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    ctx.user_data["waiting_for_broadcast"] = True
+    await update.message.reply_text("📢 اكتب الرسالة اللي عايز تبعتها لكل المستخدمين:")
+
+async def do_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.user_data.get("waiting_for_broadcast"): return False
+    if update.effective_user.id != ADMIN_ID: return False
+    ctx.user_data["waiting_for_broadcast"] = False
+    text = update.message.text
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id FROM users") as cur:
+            users = await cur.fetchall()
+    sent = 0
+    for (uid,) in users:
+        try:
+            await ctx.bot.send_message(uid, text)
+            sent += 1
+        except: pass
+    await update.message.reply_text(f"✅ تم إرسال الرسالة لـ {sent} مستخدم.")
+    return True
+
+async def admin_give_vip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    try:
+        args = ctx.args
+        uid = int(args[0])
+        days = int(args[1]) if len(args) > 1 else 30
+        await set_vip(uid, days)
+        await update.message.reply_text(f"✅ تم تفعيل VIP لـ {uid} لمدة {days} يوم.")
+    except:
+        await update.message.reply_text("الاستخدام: `/give_vip [ID] [أيام]`", parse_mode="Markdown")
+
+async def admin_ban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    try:
+        uid = int(ctx.args[0])
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("INSERT OR IGNORE INTO banned_users (user_id) VALUES (?)", (uid,))
+            await db.commit()
+        await update.message.reply_text(f"✅ تم حظر المستخدم {uid}.")
+    except:
+        await update.message.reply_text("الاستخدام: `/ban [ID]`", parse_mode="Markdown")
+
+async def admin_unban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    try:
+        uid = int(ctx.args[0])
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM banned_users WHERE user_id=?", (uid,))
+            await db.commit()
+        await update.message.reply_text(f"✅ تم فك الحظر عن {uid}.")
+    except:
+        await update.message.reply_text("الاستخدام: `/unban [ID]`", parse_mode="Markdown")
+
 # ----------------- المعالجة الأساسية -----------------
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if await do_broadcast(update, ctx): return
     if await send_admin_reply(update, ctx): return
     if await send_number_to_user(update, ctx): return
     if ctx.user_data.get("waiting_for_support"):
@@ -387,6 +462,14 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     
     uid = update.effective_user.id
     text = update.message.text
+    
+    # فحص الحظر
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT 1 FROM banned_users WHERE user_id=?", (uid,)) as cur:
+            if await cur.fetchone():
+                await update.message.reply_text("🚫 أنت محظور من استخدام البوت.")
+                return
+    
     await update_user(uid, update.effective_user.first_name)
     vip_until, _ = await get_user(uid)
     is_vip = vip_until > time.time()
@@ -490,6 +573,13 @@ def main():
     app.add_handler(CommandHandler("vip", vip_menu))
     app.add_handler(CommandHandler("support", support_cmd))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
+    
+    # أوامر الأدمن
+    app.add_handler(CommandHandler("stats", admin_stats))
+    app.add_handler(CommandHandler("broadcast", admin_broadcast))
+    app.add_handler(CommandHandler("give_vip", admin_give_vip))
+    app.add_handler(CommandHandler("ban", admin_ban))
+    app.add_handler(CommandHandler("unban", admin_unban))
     
     app.add_handler(CallbackQueryHandler(pay_stars_cb, pattern="^pay_stars$"))
     app.add_handler(CallbackQueryHandler(pay_cash_cb, pattern="^pay_cash$"))
